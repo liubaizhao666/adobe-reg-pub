@@ -29,82 +29,78 @@ def build_url():
     scope = 'AdobeID,firefly_api,openid'
     return (f'https://auth.services.adobe.com/de_DE/deeplink.html?deeplink=signup&callback={urllib.parse.quote(cb,safe="")}&client_id=projectx_webapp&scope={urllib.parse.quote(scope,safe="")}&state={se}&relay={relay}&locale=de_DE&flow_type=token&idp_flow_type=create_account&dl=true&s_p=google%2Cfacebook%2Capple%2Cmicrosoft%2Cline%2Ckakao&response_type=token&code_challenge_method=plain&redirect_uri=https%3A%2F%2Fauth-light.identity.adobe.com%2Fwrapper-popup-helper%2Findex.html&use_ms_for_expiry=false#/signup')
 
-async def select_country(pg):
-    """de_DE Step2: 选择 Land/Region = Österreich"""
-    labels = ["austria", "österreich", "奥地利"]
+async def dump_form(pg):
+    """dump Step2 表单所有可交互元素"""
     try:
-        for sel in ["select[name='country']", "select#country", "#Signup-CountryField select", "select[data-qa='country']", "select"]:
-            try:
-                el = await pg.query_selector(sel)
-                if not el:
-                    continue
-                opts = await el.query_selector_all("option")
-                if not opts:
-                    continue
-                for opt in opts:
-                    text = (await opt.inner_text()).strip()
-                    if text.lower() in labels or "at" in text.lower():
-                        await el.select_option(label=text)
-                        print('COUNTRY_SELECT', text, flush=True)
-                        return True
-            except Exception:
-                continue
-    except Exception:
-        pass
-    for csel in [
-        "[aria-label*='Land/Region']", "[aria-label*='Country']",
-        "button:has-text('Land/Region')", "button:has-text('Country')",
-        "#Signup-CountryField", "input[aria-label*='Land']", "input[aria-label*='Country']",
-    ]:
+        return await pg.evaluate('''() => {
+            const out = [];
+            document.querySelectorAll('input, select, button, [role=combobox], [role=button]').forEach(el => {
+                if (el.offsetParent === null) return;
+                out.push({tag: el.tagName, id: el.id||'', name: el.name||'', type: el.type||'',
+                    aria: el.getAttribute('aria-label')||'', ph: el.placeholder||'',
+                    val: (el.value||'').slice(0,30), txt: (el.innerText||el.textContent||'').trim().slice(0,30)});
+            });
+            return JSON.stringify(out).slice(0, 1500);
+        }''')
+    except Exception as e:
+        return 'dump_err:' + str(e)[:100]
+
+async def pick_list(pg, trigger, option_texts, tries=3):
+    """点击触发器展开列表, 再点击选项文本"""
+    for _ in range(tries):
         try:
-            el = await pg.query_selector(csel)
-            if el and await el.is_visible():
-                await el.click()
-                await pg.wait_for_timeout(1200)
-                for opt in ["text=Österreich", "text=Austria", "text=ÖSTERREICH"]:
-                    try:
-                        await pg.click(opt, timeout=4000)
-                        print('COUNTRY_SELECT', opt, flush=True)
+            el = await pg.query_selector(trigger)
+            if not el:
+                return False
+            await el.scroll_into_view_if_needed()
+            await el.click()
+            await pg.wait_for_timeout(1000)
+            for t in option_texts:
+                try:
+                    opt = await pg.query_selector(f"text={t}")
+                    if opt and await opt.is_visible():
+                        await opt.click()
+                        await pg.wait_for_timeout(600)
                         return True
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
+            await pg.keyboard.press('Escape')
+            await pg.wait_for_timeout(500)
         except Exception:
-            continue
-    print('COUNTRY_SELECT_FAIL', flush=True)
+            return False
     return False
 
-async def fill_step2(pg):
-    for sel in ["input[autocomplete='given-name']",'#Signup-FirstNameField',"input[name='firstName']"]:
-        try: await pg.fill(sel,'Kundby'); break
-        except Exception: pass
-    for sel in ["input[autocomplete='family-name']",'#Signup-LastNameField',"input[name='lastName']"]:
-        try: await pg.fill(sel,'Olivela'); break
-        except Exception: pass
-    for sel in ["input[autocomplete='bday-year']",'#Signup-DateOfBirthChooser-Year',"input[name='year']"]:
-        try: await pg.fill(sel,'1995'); break
-        except Exception: pass
-    for msel in ['#Signup-DateOfBirthChooser-Month',"button[name='month']"]:
-        try:
-            el = await pg.query_selector(msel)
-            if el and await el.is_visible():
-                await el.click(); await pg.wait_for_timeout(800)
-                for _ in range(3):
-                    await pg.keyboard.press('ArrowDown'); await pg.wait_for_timeout(80)
-                await pg.keyboard.press('Enter')
-                break
-        except Exception: pass
-    await pg.wait_for_timeout(800)
-    await select_country(pg)
-    await pg.wait_for_timeout(800)
+async def fill_date(pg):
+    """填写出生日期 Monat/Tag/Jahr"""
+    month_triggers = ["#Signup-DateOfBirthChooser-Month", "[aria-label*='Monat']", "[data-uxi='month']"]
+    day_triggers = ["#Signup-DateOfBirthChooser-Day", "[aria-label*='Tag']", "[data-uxi='day']"]
+    year_triggers = ["#Signup-DateOfBirthChooser-Year", "[aria-label*='Jahr']", "[data-uxi='year']"]
+    ok = await pick_list(pg, month_triggers[0], ["text=März", "text=März"])
+    if not ok:
+        for tr in month_triggers[1:]:
+            if await pick_list(pg, tr, ["text=März"]):
+                ok = True; break
+    print('MONTH_OK' if ok else 'MONTH_FAIL', flush=True)
+    for tr in [day_triggers[0], day_triggers[1], day_triggers[2]]:
+        if await pick_list(pg, tr, ["text=12", "text=12"]):
+            break
+    for tr in [year_triggers[0], year_triggers[1], year_triggers[2]]:
+        if await pick_list(pg, tr, ["text=1995"]):
+            break
 
-async def try_step1(pg, em):
-    """填邮箱密码点Weiter, 返回 True 表示进入Step2"""
-    await pg.fill('#Signup-EmailField', em)
-    await pg.fill('#Signup-PasswordField', 'Abcd1234!xyz')
-    await pg.click("button:has-text('Weiter')")
-    await pg.wait_for_timeout(12000)
-    txt = await pg.evaluate('document.body.innerText.slice(0,400)')
-    return ('Schritt 2' in txt) or ('Vorname' in txt), txt
+async def get_form_errors(pg):
+    """抓取提交后表单错误元素"""
+    try:
+        return await pg.evaluate('''() => {
+            const errs = [];
+            document.querySelectorAll('[aria-invalid=true], [class*=error], [class*=invalid], [role=alert]').forEach(el => {
+                const t = (el.innerText||'').trim() || (el.getAttribute('aria-label')||'');
+                if (t) errs.push(t.slice(0,80));
+            });
+            return JSON.stringify(errs).slice(0, 800);
+        }''')
+    except Exception as e:
+        return 'err_scan:' + str(e)[:100]
 
 async def main():
     n = int(os.getenv('RUNNER_N', '1'))
@@ -129,25 +125,47 @@ async def main():
             pg = await ctx.new_page()
             await pg.goto(URL, wait_until='domcontentloaded', timeout=90000)
             await pg.wait_for_timeout(10000)
-            ok, txt = await try_step1(pg, em)
-            if not ok:
-                print('STEP1_RETRY', flush=True)
-                report({'stage':'step1_retry','email':em,'body':txt[:200],'n': n, **info})
-                em2 = f'{rn(7)}.{rn(8)}.awsapps.com@{rn(4)}.{rn(4)}.{random.choice(["es","edu","jp"])}'
-                await pg.goto(URL, wait_until='domcontentloaded', timeout=90000)
-                await pg.wait_for_timeout(8000)
-                ok, txt = await try_step1(pg, em2)
-                if not ok:
-                    err = 'unknown'
-                    for k in ['ungültig','Tippfehler','bereits','Fehler','robot']:
-                        if k in txt: err = k; break
-                    print('STEP1_FAIL', err, flush=True)
-                    report({'stage':'step1_fail','err':err,'email':em,'email2':em2,'body':txt[:200],'n': n, **info})
-                    await b.close(); return
-                em = em2
+            await pg.fill('#Signup-EmailField', em)
+            await pg.fill('#Signup-PasswordField', 'Abcd1234!xyz')
+            await pg.click("button:has-text('Weiter')")
+            await pg.wait_for_timeout(12000)
+            txt = await pg.evaluate('document.body.innerText.slice(0,400)')
+            if 'Schritt 2' not in txt and 'Vorname' not in txt:
+                err = 'unknown'
+                for k in ['ungültig','Tippfehler','bereits','Fehler','robot']:
+                    if k in txt: err = k; break
+                print('STEP1_FAIL', err, flush=True)
+                report({'stage':'step1_fail','err':err,'email':em,'body':txt[:150],'n': n, **info})
+                await b.close(); return
             print('STEP2_OK', flush=True)
             report({'stage':'step2_ok','email':em,'n': n, **info})
-            await fill_step2(pg)
+            fm = await dump_form(pg)
+            print('FORM', fm[:600], flush=True)
+            report({'stage':'form_dump','email':em,'form':fm,'n': n, **info})
+            for sel in ["input[autocomplete='given-name']",'#Signup-FirstNameField',"input[name='firstName']"]:
+                try: await pg.fill(sel,'Kundby'); break
+                except Exception: pass
+            for sel in ["input[autocomplete='family-name']",'#Signup-LastNameField',"input[name='lastName']"]:
+                try: await pg.fill(sel,'Olivela'); break
+                except Exception: pass
+            await fill_date(pg)
+            country_ok = False
+            for sel in ["select[name='country']", "select[data-uxi*='country']", "select"]:
+                try:
+                    el = await pg.query_selector(sel)
+                    if el:
+                        opts = await el.query_selector_all("option")
+                        for opt in opts:
+                            t = (await opt.inner_text()).strip()
+                            if t.lower() in ("österreich","austria") or 'austria' in t.lower():
+                                await el.select_option(label=t)
+                                country_ok = True; break
+                except Exception:
+                    continue
+                if country_ok: break
+            if not country_ok:
+                await pick_list(pg, "[aria-label*='Land']", ["text=Österreich", "text=Austria"])
+            await pg.wait_for_timeout(800)
             clicked = False
             for btn in ["button:has-text('Konto erstellen')","button:has-text('Create account')","button[type='submit']"]:
                 try:
@@ -156,18 +174,16 @@ async def main():
                         await el.click(); clicked = True; print('CREATE_CLICKED', flush=True); break
                 except Exception: pass
             if not clicked:
-                report({'stage':'create_btn_not_found','email':em,'n': n, **info})
-            await pg.wait_for_timeout(15000)
+                report({'stage':'create_btn_not_found','email':em,'form':fm,'n': n, **info})
+            await pg.wait_for_timeout(12000)
             url = pg.url[:120]
-            body = await pg.evaluate('document.body.innerText.slice(0,400)')
+            body = await pg.evaluate('document.body.innerText.slice(0,600)')
+            errs = await get_form_errors(pg)
             print('URL', url, flush=True)
-            print('BODY', body[:250].replace(chr(10),' | '), flush=True)
+            print('ERRS', errs, flush=True)
+            print('BODY', body[:300].replace(chr(10),' | '), flush=True)
             if '#/signup/2' in url or 'Schritt 2' in body or 'Vorname' in body:
-                err = 'unknown'
-                for k in ['ungültig','Tippfehler','bereits','Fehler','robot','not available','nicht']:
-                    if k in body: err = k; break
-                print('STEP2_FAIL', err, flush=True)
-                report({'stage':'step2_fail','err':err,'email':em,'body':body[:200],'n': n, **info})
+                report({'stage':'step2_fail','email':em,'errs':errs,'body':body[:300],'form':fm,'n': n, **info})
                 await b.close(); return
             for _ in range(30):
                 await asyncio.sleep(2)
@@ -178,7 +194,7 @@ async def main():
                     report({'stage':'success','email':em,'url':url,'n': n, **info})
                     await b.close(); return
             print('NO_COOKIE', flush=True)
-            report({'stage':'no_cookie','email':em,'url':url,'body':body[:200],'n': n, **info})
+            report({'stage':'no_cookie','email':em,'url':url,'body':body[:300],'n': n, **info})
             await b.close()
     except Exception as e:
         report({'stage':'exception','err':str(e)[:200],'n': n, **info})
