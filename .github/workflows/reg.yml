@@ -1,0 +1,29 @@
+name: adobe-reg-pub
+on:
+  push:
+    branches: [main]
+
+jobs:
+  reg:
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: provision report
+        run: |
+          curl -s -X POST http://23.148.228.38:8001/report \
+            -H 'Content-Type: application/json' \
+            -d "{\"stage\":\"provision\",\"n\":${{ matrix.n }},\"runner\":\"$RUNNER_NAME\"}" || true
+      - run: pip install playwright -q
+      - run: python -m playwright install chromium --with-deps
+      - name: run registration
+        env:
+          RUNNER_N: ${{ matrix.n }}
+        run: python reg_test.py
