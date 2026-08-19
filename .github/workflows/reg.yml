@@ -23,7 +23,7 @@ jobs:
             -d "{\"stage\":\"provision\",\"n\":${{ matrix.n }},\"runner\":\"$RUNNER_NAME\"}" || true
       - run: pip install playwright -q
       - run: python -m playwright install chromium --with-deps
-      - name: run api3
+      - name: run arkose probe
         env:
           RUNNER_N: ${{ matrix.n }}
-        run: python reg_api.py
+        run: python ark_probe.py
