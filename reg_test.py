@@ -40,14 +40,14 @@ async def set_react_input(pg, selector, value):
             el.dispatchEvent(new Event('change', {bubbles:true}));
             return true;
         }''', [selector, value])
-    except Exception as e:
+    except Exception:
         return False
 
 async def force_select(pg, selector, value):
     """强制显示原生select并用Playwright真实选择"""
     try:
         sel = pg.locator(selector)
-        await sel.evaluate("el => { el.style.display='block'; el.style.position='fixed'; el.style.top='0'; el.style.left='0'; el.style.zIndex='99999'; el.style.opacity='0.01'; }")
+        await sel.evaluate("el => { el.style.display='block'; el.style.position='fixed'; el.style.top='0'; el.style.left='0'; el.style.zIndex='99999'; el.style.opacity='0.01'; el.style.width='1px'; el.style.height='1px'; }")
         await sel.select_option(value)
         return True
     except Exception as e:
@@ -55,26 +55,33 @@ async def force_select(pg, selector, value):
         return False
 
 async def pick_month(pg):
-    """点击月份按钮并精确选择 März"""
+    """诊断+选择月份"""
+    out = {}
     btn = await pg.query_selector('#Signup-DateOfBirthChooser-Month')
     if not btn:
-        return 'no_btn'
+        return {'err': 'no_btn'}
     try:
         await btn.scroll_into_view_if_needed()
     except Exception:
         pass
-    await btn.click()
+    try:
+        await btn.click()
+        out['click'] = 'ok'
+    except Exception as e:
+        out['click'] = 'err:' + str(e)[:60]
     await pg.wait_for_timeout(1500)
-    items = await pg.evaluate('''() => {
-        const out = [];
-        document.querySelectorAll('[role=option], li, [data-value], [role=menuitem]').forEach(e => {
-            if (e.offsetParent !== null)
-                out.push((e.getAttribute('data-value')||'') + ':' + (e.innerText||'').trim());
-        });
-        return JSON.stringify(out).slice(0, 400);
+    diag = await pg.evaluate('''() => {
+        const d = {listbox: !!document.querySelector('[role=listbox]'),
+                   options: 0, html: '', active: (document.activeElement||{}).id||''};
+        const opts = document.querySelectorAll('[role=option]');
+        d.options = opts.length;
+        const lb = document.querySelector('[role=listbox]');
+        if (lb) d.html = lb.outerHTML.slice(0, 1200);
+        return d;
     }''')
+    out['diag'] = diag
     clicked = await pg.evaluate('''() => {
-        const all = document.querySelectorAll('[role=option], li, [data-value], [role=menuitem]');
+        const all = document.querySelectorAll('[role=option], li, [data-value]');
         for (const el of all) {
             if ((el.innerText||'').trim() === 'März' && el.offsetParent !== null) {
                 el.click(); return true;
@@ -82,16 +89,17 @@ async def pick_month(pg):
         }
         return false;
     }''')
+    out['clicked'] = clicked
     if not clicked:
         await pg.keyboard.press('ArrowDown')
         await pg.keyboard.press('ArrowDown')
         await pg.keyboard.press('Enter')
         await pg.wait_for_timeout(400)
     await pg.wait_for_timeout(800)
-    return 'clicked=' + str(clicked) + ' items=' + items
+    out['btn_after'] = await pg.evaluate('() => (document.querySelector("#Signup-DateOfBirthChooser-Month")||{}).innerText||""')
+    return out
 
 async def pick_country(pg):
-    """选择国家 Österreich (fallback)"""
     btn = await pg.query_selector('#Signup-CountryChooser')
     if not btn:
         return 'no_btn'
@@ -102,7 +110,7 @@ async def pick_country(pg):
     await btn.click()
     await pg.wait_for_timeout(1200)
     clicked = await pg.evaluate('''() => {
-        const all = document.querySelectorAll('[role=option], li, [data-value], [role=menuitem]');
+        const all = document.querySelectorAll('[role=option], li, [data-value]');
         for (const el of all) {
             if ((el.innerText||'').trim() === 'Österreich' && el.offsetParent !== null) {
                 el.click(); return true;
@@ -113,10 +121,9 @@ async def pick_country(pg):
     if not clicked:
         await pg.keyboard.press('Escape')
     await pg.wait_for_timeout(600)
-    return 'clicked=' + str(clicked)
+    return clicked
 
 async def fill_step2(pg):
-    """填 Step2 全部字段并返回状态"""
     for sel in ["input[autocomplete='given-name']",'#Signup-FirstNameField']:
         try: await pg.fill(sel,'Kundby'); break
         except Exception: pass
@@ -125,6 +132,8 @@ async def fill_step2(pg):
         except Exception: pass
     await set_react_input(pg, '#Signup-DateOfBirthChooser-Year', '1995')
     await pg.wait_for_timeout(500)
+    fs = await force_select(pg, "select[name='month']", "3")
+    await pg.wait_for_timeout(600)
     m_res = await pick_month(pg)
     c_res = await pick_country(pg)
     await pg.wait_for_timeout(500)
@@ -133,7 +142,7 @@ async def fill_step2(pg):
         year: (document.querySelector('#Signup-DateOfBirthChooser-Year')||{}).value||'',
         ccBtn: (document.querySelector('#Signup-CountryChooser')||{}).innerText||''
     })''')
-    return {'month': m_res, 'country': c_res, 'vals': vals}
+    return {'force_select': fs, 'month': m_res, 'country': c_res, 'vals': vals}
 
 async def get_form_errors(pg):
     try:
@@ -186,7 +195,7 @@ async def main():
             print('STEP2_OK', flush=True)
             report({'stage':'step2_ok','email':em,'n': n, **info})
             st = await fill_step2(pg)
-            print('FILL', st, flush=True)
+            print('FILL', json.dumps(st)[:800], flush=True)
             report({'stage':'filled','email':em,'res':st,'n': n, **info})
             clicked = False
             for btn in ["button:has-text('Konto erstellen')","button[type='submit']","button:has-text('Create account')"]:
