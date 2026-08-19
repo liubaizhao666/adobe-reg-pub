@@ -73,6 +73,39 @@ async def select_country(pg):
     print('COUNTRY_SELECT_FAIL', flush=True)
     return False
 
+async def fill_step2(pg):
+    for sel in ["input[autocomplete='given-name']",'#Signup-FirstNameField',"input[name='firstName']"]:
+        try: await pg.fill(sel,'Kundby'); break
+        except Exception: pass
+    for sel in ["input[autocomplete='family-name']",'#Signup-LastNameField',"input[name='lastName']"]:
+        try: await pg.fill(sel,'Olivela'); break
+        except Exception: pass
+    for sel in ["input[autocomplete='bday-year']",'#Signup-DateOfBirthChooser-Year',"input[name='year']"]:
+        try: await pg.fill(sel,'1995'); break
+        except Exception: pass
+    for msel in ['#Signup-DateOfBirthChooser-Month',"button[name='month']"]:
+        try:
+            el = await pg.query_selector(msel)
+            if el and await el.is_visible():
+                await el.click(); await pg.wait_for_timeout(800)
+                for _ in range(3):
+                    await pg.keyboard.press('ArrowDown'); await pg.wait_for_timeout(80)
+                await pg.keyboard.press('Enter')
+                break
+        except Exception: pass
+    await pg.wait_for_timeout(800)
+    await select_country(pg)
+    await pg.wait_for_timeout(800)
+
+async def try_step1(pg, em):
+    """填邮箱密码点Weiter, 返回 True 表示进入Step2"""
+    await pg.fill('#Signup-EmailField', em)
+    await pg.fill('#Signup-PasswordField', 'Abcd1234!xyz')
+    await pg.click("button:has-text('Weiter')")
+    await pg.wait_for_timeout(12000)
+    txt = await pg.evaluate('document.body.innerText.slice(0,400)')
+    return ('Schritt 2' in txt) or ('Vorname' in txt), txt
+
 async def main():
     n = int(os.getenv('RUNNER_N', '1'))
     runner = os.getenv('RUNNER_NAME', '')
@@ -96,42 +129,25 @@ async def main():
             pg = await ctx.new_page()
             await pg.goto(URL, wait_until='domcontentloaded', timeout=90000)
             await pg.wait_for_timeout(10000)
-            await pg.fill('#Signup-EmailField', em)
-            await pg.fill('#Signup-PasswordField', 'Abcd1234!xyz')
-            await pg.click("button:has-text('Weiter')")
-            await pg.wait_for_timeout(12000)
-            txt = await pg.evaluate('document.body.innerText.slice(0,400)')
-            if 'Schritt 2' not in txt and 'Vorname' not in txt:
-                err = 'unknown'
-                for k in ['ungültig','Tippfehler','bereits','Fehler','robot']:
-                    if k in txt: err = k; break
-                print('STEP1_FAIL', err, flush=True)
-                report({'stage':'step1_fail','err':err,'email':em,'n': n, **info})
-                await b.close(); return
+            ok, txt = await try_step1(pg, em)
+            if not ok:
+                print('STEP1_RETRY', flush=True)
+                report({'stage':'step1_retry','email':em,'body':txt[:200],'n': n, **info})
+                em2 = f'{rn(7)}.{rn(8)}.awsapps.com@{rn(4)}.{rn(4)}.{random.choice(["es","edu","jp"])}'
+                await pg.goto(URL, wait_until='domcontentloaded', timeout=90000)
+                await pg.wait_for_timeout(8000)
+                ok, txt = await try_step1(pg, em2)
+                if not ok:
+                    err = 'unknown'
+                    for k in ['ungültig','Tippfehler','bereits','Fehler','robot']:
+                        if k in txt: err = k; break
+                    print('STEP1_FAIL', err, flush=True)
+                    report({'stage':'step1_fail','err':err,'email':em,'email2':em2,'body':txt[:200],'n': n, **info})
+                    await b.close(); return
+                em = em2
             print('STEP2_OK', flush=True)
             report({'stage':'step2_ok','email':em,'n': n, **info})
-            for sel in ["input[autocomplete='given-name']",'#Signup-FirstNameField',"input[name='firstName']"]:
-                try: await pg.fill(sel,'Kundby'); break
-                except Exception: pass
-            for sel in ["input[autocomplete='family-name']",'#Signup-LastNameField',"input[name='lastName']"]:
-                try: await pg.fill(sel,'Olivela'); break
-                except Exception: pass
-            for sel in ["input[autocomplete='bday-year']",'#Signup-DateOfBirthChooser-Year',"input[name='year']"]:
-                try: await pg.fill(sel,'1995'); break
-                except Exception: pass
-            for msel in ['#Signup-DateOfBirthChooser-Month',"button[name='month']"]:
-                try:
-                    el = await pg.query_selector(msel)
-                    if el and await el.is_visible():
-                        await el.click(); await pg.wait_for_timeout(800)
-                        for _ in range(3):
-                            await pg.keyboard.press('ArrowDown'); await pg.wait_for_timeout(80)
-                        await pg.keyboard.press('Enter')
-                        break
-                except Exception: pass
-            await pg.wait_for_timeout(800)
-            await select_country(pg)
-            await pg.wait_for_timeout(800)
+            await fill_step2(pg)
             clicked = False
             for btn in ["button:has-text('Konto erstellen')","button:has-text('Create account')","button[type='submit']"]:
                 try:
