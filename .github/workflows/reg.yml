@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        n: [1, 2, 3, 4, 5]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -23,7 +23,7 @@ jobs:
             -d "{\"stage\":\"provision\",\"n\":${{ matrix.n }},\"runner\":\"$RUNNER_NAME\"}" || true
       - run: pip install playwright -q
       - run: python -m playwright install chromium --with-deps
-      - name: run api registration
+      - name: run probe
         env:
           RUNNER_N: ${{ matrix.n }}
-        run: python reg_api.py
+        run: python rec_probe.py
