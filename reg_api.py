@@ -27,9 +27,9 @@ def post_json(url, payload, headers):
         headers={'Content-Type':'application/json', **headers}, method='POST')
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            return r.status, r.read().decode()[:500]
+            return r.status, r.read().decode()[:600]
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()[:500]
+        return e.code, e.read().decode()[:600]
     except Exception as e:
         return 0, 'ERR:' + str(e)[:150]
 
@@ -51,7 +51,7 @@ async def main():
     except Exception:
         pass
     info['runner'] = runner
-    report({'stage':'api2_started','n': n, **info})
+    report({'stage':'api3_started','n': n, **info})
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -61,44 +61,40 @@ async def main():
             pg = await ctx.new_page()
             URL = build_url()
             await pg.goto(URL, wait_until='domcontentloaded', timeout=90000)
-            await pg.wait_for_timeout(12000)
-            cap = await pg.evaluate('''() => {
-                const scripts = [...document.querySelectorAll('script[src*="recaptcha"]')].map(s => s.src.slice(0,150));
-                return {grecaptcha: typeof window.grecaptcha, scripts};
-            }''')
-            report({'stage':'page_captcha','cap':cap,'n': n, **info})
+            await pg.wait_for_timeout(10000)
             token = None
             try:
-                token = await pg.evaluate('''(sk) => grecaptcha.enterprise.execute(sk, {action: 'homepage'})''', SITEKEY)
+                await pg.add_script_tag(url=f'https://www.google.com/recaptcha/enterprise.js?render={SITEKEY}')
+                await pg.wait_for_timeout(5000)
+                cap = await pg.evaluate('typeof window.grecaptcha')
+                report({'stage':'api3_cap','g':cap,'n': n, **info})
+                if cap == 'object':
+                    token = await pg.evaluate('''(sk) => grecaptcha.enterprise.execute(sk, {action: 'homepage'})''', SITEKEY)
             except Exception as e:
-                report({'stage':'page_exec_exc','err':str(e)[:120],'n': n, **info})
-            report({'stage':'page_token','ok': bool(token and len(token)>50), 'len': len(token or ''), 'token': (token or '')[:40], 'n': n, **info})
-            bfp_req = None
+                report({'stage':'api3_cap_exc','err':str(e)[:120],'n': n, **info})
+            report({'stage':'api3_token','ok': bool(token and len(token)>50), 'len': len(token or ''), 'n': n, **info})
+            bfp = {}
             try:
                 await pg.add_script_tag(url='https://bfp.adobe.com/bfp/v1/bfp.min.js')
                 await pg.wait_for_timeout(2500)
-                bfp_res = await pg.evaluate('''async () => {
-                    const out = {loaded: !!window.BFPJS};
-                    if (!window.BFPJS) return out;
+                bfp = await pg.evaluate('''async () => {
+                    const out = {};
                     try {
                         const mod = await window.BFPJS.load();
-                        out.modKeys = Object.keys(mod).slice(0,20);
-                        out.getType = typeof mod.get;
-                        out.publishType = typeof mod.publish;
                         const comps = await mod.get();
+                        out.compsKeys = Object.keys(comps).slice(0,25);
                         out.compsType = typeof comps;
-                        if (mod.publish) {
-                            const reqId = await mod.publish();
-                            out.requestId = typeof reqId === 'string' ? reqId.slice(0,80) : JSON.stringify(reqId).slice(0,80);
+                        if (comps && typeof comps.publish === 'function') {
+                            const rid = await comps.publish();
+                            out.requestId = typeof rid === 'string' ? rid.slice(0,80) : JSON.stringify(rid).slice(0,80);
                         }
-                    } catch(e) { out.err = String(e).slice(0,150); }
+                        out.raw = JSON.stringify(comps).slice(0,300);
+                    } catch(e) { out.err = String(e).slice(0,200); }
                     return out;
                 }''')
-                report({'stage':'bfp_publish','bfp':bfp_res,'n': n, **info})
-                if bfp_res.get('requestId'):
-                    bfp_req = bfp_res['requestId']
+                report({'stage':'api3_bfp','bfp':bfp,'n': n, **info})
             except Exception as e:
-                report({'stage':'bfp2_exc','err':str(e)[:150],'n': n, **info})
+                report({'stage':'api3_bfp_exc','err':str(e)[:150],'n': n, **info})
             em = f'{rn(7)}.{rn(8)}.awsapps.com@{rn(4)}.{rn(4)}.{random.choice(["es","edu","jp"])}'
             body = {
                 "account": {
@@ -113,17 +109,14 @@ async def main():
             }
             if token and len(token) > 50:
                 body["captchaResponse"] = token
-            headers = {'X-IMS-CLIENTID': 'projectx_webapp'}
+            headers = {'X-IMS-CLIENTID': 'projectx_webapp',
+                       'Origin': 'https://auth.services.adobe.com',
+                       'Referer': 'https://auth.services.adobe.com/'}
             st, resp = post_json('https://auth.services.adobe.com/signin/v1/accounts', body, headers)
-            report({'stage':'api2_reg','status':st,'resp':resp[:300],'email':em,'token_len':len(token or ''),'n': n, **info})
-            if bfp_req:
-                headers2 = dict(headers)
-                headers2['X-IMS-BFP-REQUEST-ID'] = bfp_req
-                st3, resp3 = post_json('https://auth.services.adobe.com/signin/v1/accounts', body, headers2)
-                report({'stage':'api2_bfp_hdr','status':st3,'resp':resp3[:300],'email':em,'n': n, **info})
+            report({'stage':'api3_reg','status':st,'resp':resp[:300],'email':em,'token_len':len(token or ''),'n': n, **info})
             await b.close()
     except Exception as e:
-        report({'stage':'api2_exception','err':str(e)[:200],'n': n, **info})
+        report({'stage':'api3_exception','err':str(e)[:200],'n': n, **info})
         traceback.print_exc()
 
 asyncio.run(main())
