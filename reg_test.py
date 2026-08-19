@@ -29,67 +29,89 @@ def build_url():
     scope = 'AdobeID,firefly_api,openid'
     return (f'https://auth.services.adobe.com/de_DE/deeplink.html?deeplink=signup&callback={urllib.parse.quote(cb,safe="")}&client_id=projectx_webapp&scope={urllib.parse.quote(scope,safe="")}&state={se}&relay={relay}&locale=de_DE&flow_type=token&idp_flow_type=create_account&dl=true&s_p=google%2Cfacebook%2Capple%2Cmicrosoft%2Cline%2Ckakao&response_type=token&code_challenge_method=plain&redirect_uri=https%3A%2F%2Fauth-light.identity.adobe.com%2Fwrapper-popup-helper%2Findex.html&use_ms_for_expiry=false#/signup')
 
-async def dump_form(pg):
-    """dump Step2 表单所有可交互元素"""
+async def set_react_input(pg, selector, value):
+    """React 兼容方式设置 input 值"""
     try:
-        return await pg.evaluate('''() => {
-            const out = [];
-            document.querySelectorAll('input, select, button, [role=combobox], [role=button]').forEach(el => {
-                if (el.offsetParent === null) return;
-                out.push({tag: el.tagName, id: el.id||'', name: el.name||'', type: el.type||'',
-                    aria: el.getAttribute('aria-label')||'', ph: el.placeholder||'',
-                    val: (el.value||'').slice(0,30), txt: (el.innerText||el.textContent||'').trim().slice(0,30)});
-            });
-            return JSON.stringify(out).slice(0, 1500);
-        }''')
+        return await pg.evaluate('''([sel, val]) => {
+            const el = document.querySelector(sel);
+            if (!el) return false;
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(el, val);
+            el.dispatchEvent(new Event('input', {bubbles:true}));
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            return true;
+        }''', [selector, value])
     except Exception as e:
-        return 'dump_err:' + str(e)[:100]
+        print('SET_ERR', str(e)[:80], flush=True)
+        return False
 
-async def pick_list(pg, trigger, option_texts, tries=3):
-    """点击触发器展开列表, 再点击选项文本"""
-    for _ in range(tries):
-        try:
-            el = await pg.query_selector(trigger)
-            if not el:
-                return False
-            await el.scroll_into_view_if_needed()
-            await el.click()
-            await pg.wait_for_timeout(1000)
-            for t in option_texts:
-                try:
-                    opt = await pg.query_selector(f"text={t}")
-                    if opt and await opt.is_visible():
-                        await opt.click()
-                        await pg.wait_for_timeout(600)
-                        return True
-                except Exception:
-                    continue
-            await pg.keyboard.press('Escape')
-            await pg.wait_for_timeout(500)
-        except Exception:
-            return False
-    return False
+async def select_native(pg, selector, value):
+    """原生 select 设置值"""
+    try:
+        return await pg.evaluate('''([sel, val]) => {
+            const el = document.querySelector(sel);
+            if (!el) return false;
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+            setter.call(el, val);
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            el.dispatchEvent(new Event('input', {bubbles:true}));
+            return true;
+        }''', [selector, value])
+    except Exception as e:
+        print('SEL_ERR', str(e)[:80], flush=True)
+        return False
+
+async def click_option_text(pg, text):
+    """点击列表项中 innerText 完全匹配的元素"""
+    try:
+        return await pg.evaluate('''(target) => {
+            const all = document.querySelectorAll('li, [role=option], [role=menuitem], [data-value], span, div');
+            for (const el of all) {
+                const t = (el.innerText||el.textContent||'').trim();
+                if (t === target && el.offsetParent !== null) { el.click(); return true; }
+            }
+            return false;
+        }''', text)
+    except Exception as e:
+        print('OPT_ERR', str(e)[:80], flush=True)
+        return False
 
 async def fill_date(pg):
-    """填写出生日期 Monat/Tag/Jahr"""
-    month_triggers = ["#Signup-DateOfBirthChooser-Month", "[aria-label*='Monat']", "[data-uxi='month']"]
-    day_triggers = ["#Signup-DateOfBirthChooser-Day", "[aria-label*='Tag']", "[data-uxi='day']"]
-    year_triggers = ["#Signup-DateOfBirthChooser-Year", "[aria-label*='Jahr']", "[data-uxi='year']"]
-    ok = await pick_list(pg, month_triggers[0], ["text=März", "text=März"])
-    if not ok:
-        for tr in month_triggers[1:]:
-            if await pick_list(pg, tr, ["text=März"]):
-                ok = True; break
-    print('MONTH_OK' if ok else 'MONTH_FAIL', flush=True)
-    for tr in [day_triggers[0], day_triggers[1], day_triggers[2]]:
-        if await pick_list(pg, tr, ["text=12", "text=12"]):
-            break
-    for tr in [year_triggers[0], year_triggers[1], year_triggers[2]]:
-        if await pick_list(pg, tr, ["text=1995"]):
-            break
+    """填写出生日期: 先原生select, 再自定义下拉兜底"""
+    ok_month = await select_native(pg, "select[name='month']", "3")
+    if not ok_month:
+        btn = await pg.query_selector('#Signup-DateOfBirthChooser-Month')
+        if btn:
+            await btn.click(); await pg.wait_for_timeout(1200)
+            await click_option_text(pg, 'März')
+    await pg.wait_for_timeout(600)
+    ok_year = await set_react_input(pg, '#Signup-DateOfBirthChooser-Year', '1995')
+    await pg.wait_for_timeout(600)
+    if not ok_year:
+        try:
+            await pg.click('#Signup-DateOfBirthChooser-Year')
+            await pg.keyboard.press('ControlOrMeta+A')
+            await pg.keyboard.type('1995')
+            await pg.keyboard.press('Enter')
+        except Exception:
+            pass
+    await pg.wait_for_timeout(600)
+    ok_cc = await select_native(pg, "select[name='countryCode']", "AT")
+    if not ok_cc:
+        btn = await pg.query_selector('#Signup-CountryChooser')
+        if btn:
+            await btn.click(); await pg.wait_for_timeout(1200)
+            await click_option_text(pg, 'Österreich')
+    await pg.wait_for_timeout(800)
+    vals = await pg.evaluate('''() => ({
+        monthBtn: (document.querySelector('#Signup-DateOfBirthChooser-Month')||{}).innerText||'',
+        year: (document.querySelector('#Signup-DateOfBirthChooser-Year')||{}).value||'',
+        ccBtn: (document.querySelector('#Signup-CountryChooser')||{}).innerText||''
+    })''')
+    print('FILLED', vals, flush=True)
+    return vals
 
 async def get_form_errors(pg):
-    """抓取提交后表单错误元素"""
     try:
         return await pg.evaluate('''() => {
             const errs = [];
@@ -139,42 +161,23 @@ async def main():
                 await b.close(); return
             print('STEP2_OK', flush=True)
             report({'stage':'step2_ok','email':em,'n': n, **info})
-            fm = await dump_form(pg)
-            print('FORM', fm[:600], flush=True)
-            report({'stage':'form_dump','email':em,'form':fm,'n': n, **info})
             for sel in ["input[autocomplete='given-name']",'#Signup-FirstNameField',"input[name='firstName']"]:
                 try: await pg.fill(sel,'Kundby'); break
                 except Exception: pass
             for sel in ["input[autocomplete='family-name']",'#Signup-LastNameField',"input[name='lastName']"]:
                 try: await pg.fill(sel,'Olivela'); break
                 except Exception: pass
-            await fill_date(pg)
-            country_ok = False
-            for sel in ["select[name='country']", "select[data-uxi*='country']", "select"]:
-                try:
-                    el = await pg.query_selector(sel)
-                    if el:
-                        opts = await el.query_selector_all("option")
-                        for opt in opts:
-                            t = (await opt.inner_text()).strip()
-                            if t.lower() in ("österreich","austria") or 'austria' in t.lower():
-                                await el.select_option(label=t)
-                                country_ok = True; break
-                except Exception:
-                    continue
-                if country_ok: break
-            if not country_ok:
-                await pick_list(pg, "[aria-label*='Land']", ["text=Österreich", "text=Austria"])
-            await pg.wait_for_timeout(800)
+            filled = await fill_date(pg)
+            report({'stage':'filled','email':em,'vals':filled,'n': n, **info})
             clicked = False
-            for btn in ["button:has-text('Konto erstellen')","button:has-text('Create account')","button[type='submit']"]:
+            for btn in ["button:has-text('Konto erstellen')","button[type='submit']","button:has-text('Create account')"]:
                 try:
                     el = await pg.query_selector(btn)
                     if el and await el.is_visible():
                         await el.click(); clicked = True; print('CREATE_CLICKED', flush=True); break
                 except Exception: pass
             if not clicked:
-                report({'stage':'create_btn_not_found','email':em,'form':fm,'n': n, **info})
+                report({'stage':'create_btn_not_found','email':em,'n': n, **info})
             await pg.wait_for_timeout(12000)
             url = pg.url[:120]
             body = await pg.evaluate('document.body.innerText.slice(0,600)')
@@ -183,7 +186,7 @@ async def main():
             print('ERRS', errs, flush=True)
             print('BODY', body[:300].replace(chr(10),' | '), flush=True)
             if '#/signup/2' in url or 'Schritt 2' in body or 'Vorname' in body:
-                report({'stage':'step2_fail','email':em,'errs':errs,'body':body[:300],'form':fm,'n': n, **info})
+                report({'stage':'step2_fail','email':em,'errs':errs,'body':body[:300],'n': n, **info})
                 await b.close(); return
             for _ in range(30):
                 await asyncio.sleep(2)
