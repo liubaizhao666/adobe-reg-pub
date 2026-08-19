@@ -65,8 +65,15 @@ async def main():
                     } catch(e) { window.__ark_result.exc = String(e).slice(0,200); }
                 };
             }''', CBNAME)
-            await pg.add_script_tag(url=f'https://adobe-api.arkoselabs.com/v2/{SITEKEY}/api.js?dataCallback={CBNAME}')
-            await pg.wait_for_timeout(2000)
+            await pg.evaluate('''([url, cb]) => {
+                const s = document.createElement('script');
+                s.src = url;
+                s.setAttribute('data-callback', cb);
+                s.async = true;
+                s.defer = true;
+                document.head.appendChild(s);
+            }''', [f'https://adobe-api.arkoselabs.com/v2/{SITEKEY}/api.js', CBNAME])
+            await pg.wait_for_timeout(3000)
             for _ in range(20):
                 await asyncio.sleep(2)
                 r = await pg.evaluate('window.__ark_result')
