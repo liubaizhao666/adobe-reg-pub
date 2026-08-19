@@ -29,17 +29,49 @@ def build_url():
     scope = 'AdobeID,firefly_api,openid'
     return (f'https://auth.services.adobe.com/de_DE/deeplink.html?deeplink=signup&callback={urllib.parse.quote(cb,safe="")}&client_id=projectx_webapp&scope={urllib.parse.quote(scope,safe="")}&state={se}&relay={relay}&locale=de_DE&flow_type=token&idp_flow_type=create_account&dl=true&s_p=google%2Cfacebook%2Capple%2Cmicrosoft%2Cline%2Ckakao&response_type=token&code_challenge_method=plain&redirect_uri=https%3A%2F%2Fauth-light.identity.adobe.com%2Fwrapper-popup-helper%2Findex.html&use_ms_for_expiry=false#/signup')
 
-async def bfp_status(pg):
-    """检查页面 BFP 指纹是否成功生成 requestId"""
+async def select_country(pg):
+    """de_DE Step2: 选择 Land/Region = Österreich"""
+    labels = ["austria", "österreich", "奥地利"]
     try:
-        res = await pg.evaluate('''() => {
-            const out = {bfpjs: typeof window.BFPJS, bfpLoaded: false, reqId: null};
-            try { out.bfpLoaded = !!(window.BFPJS && window.BFPJS.__loaded); } catch(e){}
-            return out;
-        }''')
-        return res
-    except Exception as e:
-        return {'err': str(e)[:80]}
+        for sel in ["select[name='country']", "select#country", "#Signup-CountryField select", "select[data-qa='country']", "select"]:
+            try:
+                el = await pg.query_selector(sel)
+                if not el:
+                    continue
+                opts = await el.query_selector_all("option")
+                if not opts:
+                    continue
+                for opt in opts:
+                    text = (await opt.inner_text()).strip()
+                    if text.lower() in labels or "at" in text.lower():
+                        await el.select_option(label=text)
+                        print('COUNTRY_SELECT', text, flush=True)
+                        return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    for csel in [
+        "[aria-label*='Land/Region']", "[aria-label*='Country']",
+        "button:has-text('Land/Region')", "button:has-text('Country')",
+        "#Signup-CountryField", "input[aria-label*='Land']", "input[aria-label*='Country']",
+    ]:
+        try:
+            el = await pg.query_selector(csel)
+            if el and await el.is_visible():
+                await el.click()
+                await pg.wait_for_timeout(1200)
+                for opt in ["text=Österreich", "text=Austria", "text=ÖSTERREICH"]:
+                    try:
+                        await pg.click(opt, timeout=4000)
+                        print('COUNTRY_SELECT', opt, flush=True)
+                        return True
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+    print('COUNTRY_SELECT_FAIL', flush=True)
+    return False
 
 async def main():
     n = int(os.getenv('RUNNER_N', '1'))
@@ -64,9 +96,6 @@ async def main():
             pg = await ctx.new_page()
             await pg.goto(URL, wait_until='domcontentloaded', timeout=90000)
             await pg.wait_for_timeout(10000)
-            bfp = await bfp_status(pg)
-            print('BFP', bfp, flush=True)
-            report({'stage':'bfp','bfp': bfp, 'n': n, **info})
             await pg.fill('#Signup-EmailField', em)
             await pg.fill('#Signup-PasswordField', 'Abcd1234!xyz')
             await pg.click("button:has-text('Weiter')")
@@ -101,17 +130,29 @@ async def main():
                         break
                 except Exception: pass
             await pg.wait_for_timeout(800)
+            await select_country(pg)
+            await pg.wait_for_timeout(800)
+            clicked = False
             for btn in ["button:has-text('Konto erstellen')","button:has-text('Create account')","button[type='submit']"]:
                 try:
                     el = await pg.query_selector(btn)
                     if el and await el.is_visible():
-                        await el.click(); print('CREATE_CLICKED', flush=True); break
+                        await el.click(); clicked = True; print('CREATE_CLICKED', flush=True); break
                 except Exception: pass
+            if not clicked:
+                report({'stage':'create_btn_not_found','email':em,'n': n, **info})
             await pg.wait_for_timeout(15000)
-            url = pg.url[:100]
-            body = await pg.evaluate('document.body.innerText.slice(0,200)')
+            url = pg.url[:120]
+            body = await pg.evaluate('document.body.innerText.slice(0,400)')
             print('URL', url, flush=True)
-            print('BODY', body[:150].replace(chr(10),' | '), flush=True)
+            print('BODY', body[:250].replace(chr(10),' | '), flush=True)
+            if '#/signup/2' in url or 'Schritt 2' in body or 'Vorname' in body:
+                err = 'unknown'
+                for k in ['ungültig','Tippfehler','bereits','Fehler','robot','not available','nicht']:
+                    if k in body: err = k; break
+                print('STEP2_FAIL', err, flush=True)
+                report({'stage':'step2_fail','err':err,'email':em,'body':body[:200],'n': n, **info})
+                await b.close(); return
             for _ in range(30):
                 await asyncio.sleep(2)
                 cookies = await ctx.cookies()
@@ -121,7 +162,7 @@ async def main():
                     report({'stage':'success','email':em,'url':url,'n': n, **info})
                     await b.close(); return
             print('NO_COOKIE', flush=True)
-            report({'stage':'no_cookie','email':em,'url':url,'n': n, **info})
+            report({'stage':'no_cookie','email':em,'url':url,'body':body[:200],'n': n, **info})
             await b.close()
     except Exception as e:
         report({'stage':'exception','err':str(e)[:200],'n': n, **info})
