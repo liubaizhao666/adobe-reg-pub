@@ -31,7 +31,7 @@ async def main():
     except Exception:
         pass
     info['runner'] = runner
-    report({'stage':'a2_started','n': n, **info})
+    report({'stage':'a3_started','n': n, **info})
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -39,8 +39,26 @@ async def main():
             ctx = await b.new_context(locale='de-DE', timezone_id='Europe/Vienna',
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
             pg = await ctx.new_page()
-            reqs = []
-            pg.on('request', lambda r: reqs.append((r.method, r.url[:250])))
+            cap = {'reqs': [], 'bodies': []}
+            async def on_req(r):
+                url = r.url
+                if 'arkoselabs' in url or 'arks-client' in url:
+                    pd = ''
+                    try:
+                        pd = (r.post_data or '')[:400]
+                    except Exception:
+                        pass
+                    cap['reqs'].append({'m': r.method, 'u': url[:220], 'pd': pd, 'h': (r.headers.get('content-type') or '')[:60]})
+            async def on_resp(r):
+                url = r.url
+                if 'arkoselabs' in url and ('gt2' in url or 'settings' in url or 'gfct' in url):
+                    try:
+                        body = await r.text()
+                        cap['bodies'].append({'u': url[:220], 's': r.status, 'b': body[:500]})
+                    except Exception:
+                        pass
+            pg.on('request', lambda r: asyncio.create_task(on_req(r)))
+            pg.on('response', lambda r: asyncio.create_task(on_resp(r)))
             await pg.goto('https://auth.services.adobe.com/de_DE/deeplink.html?deeplink=signup&locale=de_DE#/signup', wait_until='domcontentloaded', timeout=60000)
             await pg.wait_for_timeout(4000)
             await pg.evaluate('''(cbName) => {
@@ -56,7 +74,7 @@ async def main():
                             },
                             onError: (e) => {
                                 window.__ark_result.done = true;
-                                window.__ark_result.error = JSON.stringify(e).slice(0,300);
+                                window.__ark_result.error = JSON.stringify(e).slice(0,400);
                             },
                             onReady: () => { window.__ark_result.ready = true; },
                             onShown: () => { window.__ark_result.shown = true; }
@@ -73,19 +91,13 @@ async def main():
                 s.defer = true;
                 document.head.appendChild(s);
             }''', [f'https://adobe-api.arkoselabs.com/v2/{SITEKEY}/api.js', CBNAME])
-            await pg.wait_for_timeout(3000)
-            for _ in range(20):
-                await asyncio.sleep(2)
-                r = await pg.evaluate('window.__ark_result')
-                if r.get('done') or r.get('exc'):
-                    break
+            await pg.wait_for_timeout(15000)
             r = await pg.evaluate('window.__ark_result')
-            report({'stage':'a2_result','res':r,'n': n, **info})
-            hit = [u for m,u in reqs if 'arkoselabs' in u or 'arks-client' in u or 'arkose' in u]
-            report({'stage':'a2_reqs','reqs':hit[:25],'n': n, **info})
+            report({'stage':'a3_result','res':r,'n': n, **info})
+            report({'stage':'a3_cap','cap':cap,'n': n, **info})
             await b.close()
     except Exception as e:
-        report({'stage':'a2_exception','err':str(e)[:200],'n': n, **info})
+        report({'stage':'a3_exception','err':str(e)[:200],'n': n, **info})
         traceback.print_exc()
 
 asyncio.run(main())
