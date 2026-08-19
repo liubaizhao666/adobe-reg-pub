@@ -33,6 +33,14 @@ def post_json(url, payload, headers):
     except Exception as e:
         return 0, 'ERR:' + str(e)[:150]
 
+def build_url():
+    relay = '5f63be8b-2d0d-4c9c-ac94-09add7650fde'
+    state = json.dumps({"name":"AccessTokenFlow","side":"popup","data":{"access_token":"","returnOrigin":"https://auth-light.identity.adobe.com","client_id":"projectx_webapp","clientId":"projectx_webapp","relay":relay,"useMessageChannel":True}}, separators=(",",":"))
+    se = urllib.parse.quote(state)
+    cb = f'https://ims-na1.adobelogin.com/ims/adobeid/projectx_webapp/AdobeID/token?redirect_uri=https%3A%2F%2Fauth-light.identity.adobe.com%2Fwrapper-popup-helper%2Findex.html&state={se}&code_challenge_method=plain&use_ms_for_expiry=false'
+    scope = 'AdobeID,firefly_api,openid'
+    return (f'https://auth.services.adobe.com/de_DE/deeplink.html?deeplink=signup&callback={urllib.parse.quote(cb,safe="")}&client_id=projectx_webapp&scope={urllib.parse.quote(scope,safe="")}&state={se}&relay={relay}&locale=de_DE&flow_type=token&idp_flow_type=create_account&dl=true&s_p=google%2Cfacebook%2Capple%2Cmicrosoft%2Cline%2Ckakao&response_type=token&code_challenge_method=plain&redirect_uri=https%3A%2F%2Fauth-light.identity.adobe.com%2Fwrapper-popup-helper%2Findex.html&use_ms_for_expiry=false#/signup')
+
 async def main():
     n = int(os.getenv('RUNNER_N', '1'))
     runner = os.getenv('RUNNER_NAME', '')
@@ -43,7 +51,7 @@ async def main():
     except Exception:
         pass
     info['runner'] = runner
-    report({'stage':'api_started','n': n, **info})
+    report({'stage':'api2_started','n': n, **info})
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -51,41 +59,46 @@ async def main():
             ctx = await b.new_context(locale='de-DE', timezone_id='Europe/Vienna',
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
             pg = await ctx.new_page()
-            await pg.goto('https://auth-light.identity.adobe.com/wrapper-popup-helper/index.html', wait_until='domcontentloaded', timeout=60000)
-            await pg.wait_for_timeout(3000)
+            URL = build_url()
+            await pg.goto(URL, wait_until='domcontentloaded', timeout=90000)
+            await pg.wait_for_timeout(12000)
+            cap = await pg.evaluate('''() => {
+                const scripts = [...document.querySelectorAll('script[src*="recaptcha"]')].map(s => s.src.slice(0,150));
+                return {grecaptcha: typeof window.grecaptcha, scripts};
+            }''')
+            report({'stage':'page_captcha','cap':cap,'n': n, **info})
+            token = None
             try:
-                await pg.add_script_tag(url=f'https://www.google.com/recaptcha/enterprise.js?render={SITEKEY}')
-                await pg.wait_for_timeout(4000)
-                recaptcha = await pg.evaluate('typeof window.grecaptcha')
-                report({'stage':'recaptcha','grecaptcha':recaptcha,'n': n, **info})
-                token = None
-                if recaptcha == 'object':
-                    for attempt in range(3):
-                        try:
-                            token = await pg.evaluate('''(sk) => grecaptcha.enterprise.execute(sk, {action: 'homepage'})''', SITEKEY)
-                            if token and len(token) > 50:
-                                break
-                        except Exception:
-                            await pg.wait_for_timeout(2000)
-                report({'stage':'recaptcha_token','ok': bool(token and len(token)>50), 'len': len(token or ''), 'token': (token or '')[:40], 'n': n, **info})
+                token = await pg.evaluate('''(sk) => grecaptcha.enterprise.execute(sk, {action: 'homepage'})''', SITEKEY)
             except Exception as e:
-                report({'stage':'recaptcha_exc','err':str(e)[:150],'n': n, **info})
-                token = None
+                report({'stage':'page_exec_exc','err':str(e)[:120],'n': n, **info})
+            report({'stage':'page_token','ok': bool(token and len(token)>50), 'len': len(token or ''), 'token': (token or '')[:40], 'n': n, **info})
+            bfp_req = None
             try:
                 await pg.add_script_tag(url='https://bfp.adobe.com/bfp/v1/bfp.min.js')
-                await pg.wait_for_timeout(3000)
-                bfp_info = await pg.evaluate('''() => {
-                    const out = {bfpjs: typeof window.BFPJS};
-                    if (window.BFPJS) {
-                        out.keys = Object.keys(window.BFPJS).slice(0,20);
-                        out.loadType = typeof window.BFPJS.load;
-                        out.getType = typeof window.BFPJS.get;
-                    }
+                await pg.wait_for_timeout(2500)
+                bfp_res = await pg.evaluate('''async () => {
+                    const out = {loaded: !!window.BFPJS};
+                    if (!window.BFPJS) return out;
+                    try {
+                        const mod = await window.BFPJS.load();
+                        out.modKeys = Object.keys(mod).slice(0,20);
+                        out.getType = typeof mod.get;
+                        out.publishType = typeof mod.publish;
+                        const comps = await mod.get();
+                        out.compsType = typeof comps;
+                        if (mod.publish) {
+                            const reqId = await mod.publish();
+                            out.requestId = typeof reqId === 'string' ? reqId.slice(0,80) : JSON.stringify(reqId).slice(0,80);
+                        }
+                    } catch(e) { out.err = String(e).slice(0,150); }
                     return out;
                 }''')
-                report({'stage':'bfp_dump','bfp':bfp_info,'n': n, **info})
+                report({'stage':'bfp_publish','bfp':bfp_res,'n': n, **info})
+                if bfp_res.get('requestId'):
+                    bfp_req = bfp_res['requestId']
             except Exception as e:
-                report({'stage':'bfp_exc','err':str(e)[:150],'n': n, **info})
+                report({'stage':'bfp2_exc','err':str(e)[:150],'n': n, **info})
             em = f'{rn(7)}.{rn(8)}.awsapps.com@{rn(4)}.{rn(4)}.{random.choice(["es","edu","jp"])}'
             body = {
                 "account": {
@@ -102,15 +115,15 @@ async def main():
                 body["captchaResponse"] = token
             headers = {'X-IMS-CLIENTID': 'projectx_webapp'}
             st, resp = post_json('https://auth.services.adobe.com/signin/v1/accounts', body, headers)
-            report({'stage':'api_reg','status':st,'resp':resp[:300],'email':em,'with_captcha':bool(token and len(token)>50),'n': n, **info})
-            if token and len(token) > 50:
-                body2 = json.loads(json.dumps(body))
-                body2.pop('captchaResponse', None)
-                st2, resp2 = post_json('https://auth.services.adobe.com/signin/v1/accounts', body2, headers)
-                report({'stage':'api_reg_nocap','status':st2,'resp':resp2[:300],'email':em,'n': n, **info})
+            report({'stage':'api2_reg','status':st,'resp':resp[:300],'email':em,'token_len':len(token or ''),'n': n, **info})
+            if bfp_req:
+                headers2 = dict(headers)
+                headers2['X-IMS-BFP-REQUEST-ID'] = bfp_req
+                st3, resp3 = post_json('https://auth.services.adobe.com/signin/v1/accounts', body, headers2)
+                report({'stage':'api2_bfp_hdr','status':st3,'resp':resp3[:300],'email':em,'n': n, **info})
             await b.close()
     except Exception as e:
-        report({'stage':'api_exception','err':str(e)[:200],'n': n, **info})
+        report({'stage':'api2_exception','err':str(e)[:200],'n': n, **info})
         traceback.print_exc()
 
 asyncio.run(main())
